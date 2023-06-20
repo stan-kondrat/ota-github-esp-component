@@ -1,0 +1,21 @@
+version: "0.0.1"
+description: "Esp32 Over-The-Air(OTA) Github"
+url: "https://github.com/stan-kondrat/ota-github-esp-component"
+dependencies:
+  idf:
+    version: ">=5"
+  semver:
+    path: .
+    git: ssh://git@github.com/stan-kondrat/semver-esp-component.git
+  lwjson:
+    path: .
+    git: ssh://git@github.com/stan-kondrat/lwjson-esp-component.git
+  ota-esp-component:
+    path: .
+    git: ssh://git@github.com/stan-kondrat/ota-esp-component.git
+files:
+  include:
+    - "src/ota_github.c"
+    - "src/ota_github.h"
+    - "src/LICENSE"
+    - "src/README.md"
