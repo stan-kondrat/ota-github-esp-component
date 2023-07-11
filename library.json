@@ -1,6 +1,6 @@
 {
   "name": "ota-github",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Esp32 Over-The-Air(OTA) Github",
   "keywords": "esp32 ota github",
   "repository":

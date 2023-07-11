@@ -36,9 +36,7 @@ esp_err_t ota_github_install_latest(ota_github_config_t * github_config) {
     }
     ESP_LOGI(TAG, "Download url: %s \n", releases->releases[0].download_url);
 
-    ota_config_t ota_config = {0};
-    strncpy((char *)ota_config.url, (char *)releases->releases[0].download_url, 256);
-    ota_install(ota_config);
+    ota_install((uint8_t *)releases->releases[0].download_url);
     
     return ESP_OK;
 }
