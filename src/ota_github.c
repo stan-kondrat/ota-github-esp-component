@@ -209,7 +209,7 @@ void ota_github_stream_callback(lwjson_stream_parser_t *jsp, lwjson_stream_type_
     // finish item in assets array
     if (type == LWJSON_STREAM_TYPE_OBJECT_END && (*jsp).stack_pos == 4) {
         // ESP_LOGI(TAG, "4 LWJSON_STREAM_TYPE_OBJECT_END %s / %s ", ota_github_release_asset.name, ota_github_release_asset.url);
-        if (ota_github_release_asset.url != NULL
+        if (ota_github_release_asset.url[0] == '\0'
             && strcmp((char *)ota_github_release_asset.name, (char *)ota_github_config.filename) == 0
         ) {
             strncpy(
