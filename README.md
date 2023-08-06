@@ -6,10 +6,9 @@
 1. Add **ota-github** dependency to **idf_component.yml**
 ```yml
 dependencies:
-  espressif/led_strip: "*"
   idf:
     version: ">=5"
-  ota-github:
+  ota-github-esp-component:
     path: .
     git: https://github.com/stan-kondrat/ota-github-esp-component.git
 ```
@@ -43,7 +42,14 @@ ota_github_install_latest((ota_github_config_t){
 });
 ```
 
-For a more advanced example that includes the ability to select specific versions and usage a GitHub Actions workflow, please visit the following link: https://github.com/stan-kondrat/ota-github-example .
+For a more advanced example that includes the ability to select specific versions and usage a GitHub Actions workflow, please visit the following link: https://github.com/stan-kondrat/ota-github-esp-example .
+
+## Development
+
+Formating
+```sh
+find ./src -iname "*.h" -o -iname "*.c" | xargs clang-format -style=file -i
+```
 
 ## Similar projects
 

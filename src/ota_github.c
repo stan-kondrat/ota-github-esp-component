@@ -1,67 +1,67 @@
-#include <stdio.h>
-#include "esp_log.h"
 #include "esp_http_client.h"
+#include "esp_log.h"
 #include "sdkconfig.h"
+#include <stdio.h>
 
+#include "errno.h"
 #include "lwjson/lwjson.h"
-#include "semver.h"
 #include "ota.h"
+#include "semver.h"
 
 #include "ota_github.h"
 
-#define MAX_HTTP_RECV_BUFFER 512
+#define MAX_HTTP_RECV_BUFFER 256
 #define OTA_GUTHUB_MAX_URL_LENGTH 256
 #define OTA_GUTHUB_API_URL "https://api.github.com/repos/"
 
 #define CONFIG_EXAMPLE_OTA_RECV_TIMEOUT 7000
+// #define CONFIG_LOG_MAXIMUM_LEVEL 4
 
-ota_github_config_t ota_github_config = {0};
-ota_github_release_t ota_github_release = {0};
-ota_github_releases_t ota_github_releases = {0};
-ota_github_release_asset_t ota_github_release_asset = {0};
+static ota_github_config_t *g_ota_github_config = NULL;
+static ota_github_releases_t *g_ota_github_releases = NULL;
 
-esp_err_t ota_github_stream_parse(lwjson_stream_parser_t *jsp, char * json_str, int size);
-void ota_github_stream_callback(lwjson_stream_parser_t *jsp, lwjson_stream_type_t type);
+esp_err_t _ota_github_stream_parse(lwjson_stream_parser_t *jsp, char *json_str, int size);
+void _ota_github_stream_callback(lwjson_stream_parser_t *jsp, lwjson_stream_type_t type);
 
 static const char *TAG = "OTA_GUTHUB";
 
-esp_err_t ota_github_install_latest(ota_github_config_t * github_config) {
+esp_err_t ota_github_install_latest(ota_github_config_t *github_config) {
     github_config->latest = true;
 
-    ota_github_releases_t* releases = ota_github_get_releases(github_config);
-    ESP_LOGI(TAG, "releases->size=%d", releases->size);
-    if (releases->size != 1) {
-        ESP_LOGI(TAG, "Release id not found %lld \n", github_config->release_id);
+    ota_github_releases_t releases = {0};
+    esp_err_t err = ota_github_get_releases(github_config, &releases);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Get Releases Error");
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "Download url: %s \n", releases->releases[0].download_url);
+    ESP_LOGD(TAG, "releases->size=%d", releases.size);
+    if (releases.size != 1) {
+        ESP_LOGW(TAG, "Release id not found %lld \n", github_config->release_id);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Download url: %s \n", releases.releases[0].download_url);
 
-    ota_install((uint8_t *)releases->releases[0].download_url);
-    
+    ota_install((uint8_t *)releases.releases[0].download_url);
+
     return ESP_OK;
 }
 
-ota_github_releases_t* ota_github_get_releases(const ota_github_config_t * github_config) {
-    memcpy(&ota_github_config, github_config, sizeof(ota_github_config));
-
-    ota_github_release = (ota_github_release_t){0};
-    ota_github_releases = (ota_github_releases_t){0};
-    ota_github_release_asset = (ota_github_release_asset_t){0};
-
-    char *buffer = malloc(MAX_HTTP_RECV_BUFFER + 1);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Cannot malloc http receive buffer");
-        return &ota_github_releases;
+esp_err_t ota_github_get_releases(ota_github_config_t *ota_github_config, ota_github_releases_t *ota_github_releases) {
+    if (g_ota_github_config != NULL || g_ota_github_releases != NULL) {
+        ESP_LOGW(TAG, "Ger Releases Already Running");
+        return ESP_FAIL;
     }
+    g_ota_github_config = ota_github_config;
+    g_ota_github_releases = ota_github_releases;
 
     char url[OTA_GUTHUB_MAX_URL_LENGTH] = {0};
     strcat(url, OTA_GUTHUB_API_URL);
-    strcat(url, (char *)ota_github_config.github_user);
+    strcat(url, (char *)ota_github_config->github_user);
     strcat(url, "/");
-    strcat(url, (char *)ota_github_config.github_repo);
+    strcat(url, (char *)ota_github_config->github_repo);
     strcat(url, "/releases");
 
-    if (ota_github_config.latest) {
+    if (ota_github_config->latest) {
         strcat(url, "/latest");
     }
 
@@ -74,27 +74,47 @@ ota_github_releases_t* ota_github_get_releases(const ota_github_config_t * githu
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
     esp_http_client_set_header(client, "X-GitHub-Api-Version", "2022-11-28");
 
-    ESP_LOGI(TAG, "esp_http_client_init");
+    int content_length = 0;
 
-    esp_err_t err;
-    if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
-        free(buffer);
-        return &ota_github_releases;
+    // Follow redirects
+    while (true) {
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        content_length = esp_http_client_fetch_headers(client);
+        if (content_length < 0) {
+            ESP_LOGE(TAG, "HTTP client fetch headers failed");
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        int status_code = esp_http_client_get_status_code(client);
+        ESP_LOGI(
+            TAG, "HTTP Stream reader Status = %d, content_length = %lld", status_code,
+            esp_http_client_get_content_length(client)
+        );
+        // has redirects
+        if (status_code >= 300 && status_code < 400) {
+            esp_http_client_set_redirection(client);
+            // clear the response buffer of http_client
+            char *buffer = (char *)malloc(content_length);
+            esp_http_client_read(client, buffer, content_length);
+            free(buffer);
+            continue;
+        }
+        // no more redirects
+        break;
     }
-    int64_t content_length = esp_http_client_fetch_headers(client);
-    ESP_LOGI(TAG, "content_length = %lld", content_length);
 
-    ESP_LOGI(
-        TAG, "HTTP Stream reader Status = %d, content_length = %lld", esp_http_client_get_status_code(client),
-        esp_http_client_get_content_length(client)
-    );
+    char buffer[MAX_HTTP_RECV_BUFFER + 1] = {0};
 
-    static lwjson_stream_parser_t stream_parser;
-    lwjson_stream_init(&stream_parser, ota_github_stream_callback);
+    lwjson_stream_parser_t stream_parser;
+    lwjson_stream_init(&stream_parser, _ota_github_stream_callback);
 
-    if (ota_github_config.latest) {
-        ota_github_stream_parse(&stream_parser, "[", 1);
+    if (ota_github_config->latest) {
+        _ota_github_stream_parse(&stream_parser, "[", 1);
     }
     while (1) {
         int len_to_read = content_length < MAX_HTTP_RECV_BUFFER ? (int)content_length : MAX_HTTP_RECV_BUFFER;
@@ -104,7 +124,8 @@ ota_github_releases_t* ota_github_get_releases(const ota_github_config_t * githu
             break;
         } else if (data_read_len > 0) {
             buffer[data_read_len] = 0;
-            if (ota_github_stream_parse(&stream_parser, buffer, data_read_len) != ESP_OK) {
+            ESP_LOGD(TAG, "_ota_github_stream_parse %d\n %s", data_read_len, buffer);
+            if (_ota_github_stream_parse(&stream_parser, buffer, data_read_len) != ESP_OK) {
                 break;
             }
         } else if (data_read_len == 0) {
@@ -122,21 +143,19 @@ ota_github_releases_t* ota_github_get_releases(const ota_github_config_t * githu
         }
     }
 
-    if (ota_github_config.latest) {
-        ota_github_stream_parse(&stream_parser, "]", 1);
+    if (ota_github_config->latest) {
+        _ota_github_stream_parse(&stream_parser, "]", 1);
     }
 
     lwjson_stream_reset(&stream_parser);
-    esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    free(buffer);
-
-    return &ota_github_releases;
+    g_ota_github_config = NULL;
+    g_ota_github_releases = NULL;
+    return ESP_OK;
 }
 
-
 /* Parse JSON */
-esp_err_t ota_github_stream_parse(lwjson_stream_parser_t *jsp, char * json_str, int size) {
+esp_err_t _ota_github_stream_parse(lwjson_stream_parser_t *jsp, char *json_str, int size) {
     lwjsonr_t res;
     int i = 0;
     for (const char *c = json_str; *c != '\0'; ++c, i++) {
@@ -155,115 +174,114 @@ esp_err_t ota_github_stream_parse(lwjson_stream_parser_t *jsp, char * json_str, 
     return ESP_OK;
 }
 
+void _ota_github_stream_callback(lwjson_stream_parser_t *jsp, lwjson_stream_type_t type) {
+    static ota_github_release_t release = {0};
+    static ota_github_release_asset_t asset = {0};
 
-void ota_github_stream_callback(lwjson_stream_parser_t *jsp, lwjson_stream_type_t type) {
+    ESP_LOGV(
+        TAG, "%d. Got type %d key '%s' with value '%s'", jsp->stack_pos, type, jsp->stack[jsp->stack_pos - 1].meta.name,
+        jsp->data.str.buff
+    );
+
     // [0 {1 "created_at"2: "..", "assets"2: [3 {4 "name"5: "..", "browser_download_url"5: ".."}4 ]3 }1 ]0
-    if (jsp->stack_pos >= 3
-        && jsp->stack[0].type == LWJSON_STREAM_TYPE_ARRAY 
-        && jsp->stack[1].type == LWJSON_STREAM_TYPE_OBJECT
-        && jsp->stack[2].type == LWJSON_STREAM_TYPE_KEY
-    ) {
-        // ESP_LOGI(TAG, "Got key '%s' with value '%s'\r\n", jsp->stack[2].meta.name, jsp->data.str.buff);
-        if (strcmp(jsp->stack[2].meta.name, "id") == 0 && type == LWJSON_STREAM_TYPE_NUMBER) {
-            ota_github_release.id = atoll((char *)jsp->data.str.buff);
-        }
-        if (strcmp(jsp->stack[2].meta.name, "name") == 0) {
-            strncpy((char *)ota_github_release.name, (char *)jsp->data.str.buff, sizeof(ota_github_release.name));
-        }
-        if (strcmp(jsp->stack[2].meta.name, "tag_name") == 0) {
-            strncpy(
-                (char *)ota_github_release.tag_name, (char *)jsp->data.str.buff,
-                sizeof(ota_github_release.tag_name)
-            );
-        }
-        if (strcmp(jsp->stack[2].meta.name, "created_at") == 0) {
-            strncpy(
-                (char *)ota_github_release.created_at, (char *)jsp->data.str.buff,
-                sizeof(ota_github_release.created_at)
-            );
-        }
-        if (strcmp(jsp->stack[2].meta.name, "prerelease") == 0 && type == LWJSON_STREAM_TYPE_TRUE) {
-            ota_github_release.prerelease = true;
-        }
-        if (jsp->stack_pos >= 6
-            && strcmp(jsp->stack[2].meta.name, "assets") == 0
-            && jsp->stack[3].type == LWJSON_STREAM_TYPE_ARRAY
-            && jsp->stack[4].type == LWJSON_STREAM_TYPE_OBJECT 
-            && jsp->stack[5].type == LWJSON_STREAM_TYPE_KEY
-        ){
-            if (strcmp(jsp->stack[5].meta.name, "name") == 0) {
-                strncpy(
-                    (char *)ota_github_release_asset.name, (char *)jsp->data.str.buff,
-                    sizeof(ota_github_release_asset.name)
-                );
+    if (jsp->stack_pos >= 3 && jsp->stack[0].type == LWJSON_STREAM_TYPE_ARRAY &&
+        jsp->stack[1].type == LWJSON_STREAM_TYPE_OBJECT && jsp->stack[2].type == LWJSON_STREAM_TYPE_KEY) {
+        if (jsp->stack_pos == 3) {
+            if (type == LWJSON_STREAM_TYPE_NUMBER && strcmp(jsp->stack[2].meta.name, "id") == 0) {
+                release.id = atoll((char *)jsp->data.str.buff);
+                ESP_LOGD(TAG, "=== release.id=%lld", release.id);
             }
-            if (strcmp(jsp->stack[5].meta.name, "browser_download_url") == 0) {
-                strncpy(
-                    (char *)ota_github_release_asset.url, (char *)jsp->data.str.buff,
-                    sizeof(ota_github_release_asset.url)
-                );
+            if (type == LWJSON_STREAM_TYPE_STRING && strcmp(jsp->stack[2].meta.name, "name") == 0) {
+                strncpy((char *)release.name, (char *)jsp->data.str.buff, sizeof(release.name));
+                ESP_LOGD(TAG, "=== release.name=%s", release.name);
+            }
+            if (type == LWJSON_STREAM_TYPE_STRING && strcmp(jsp->stack[2].meta.name, "tag_name") == 0) {
+                strncpy((char *)release.tag_name, (char *)jsp->data.str.buff, sizeof(release.tag_name));
+                ESP_LOGD(TAG, "=== release.tag_name=%s", release.tag_name);
+            }
+            if (type == LWJSON_STREAM_TYPE_STRING && strcmp(jsp->stack[2].meta.name, "created_at") == 0) {
+                strncpy((char *)release.created_at, (char *)jsp->data.str.buff, sizeof(release.created_at));
+                ESP_LOGD(TAG, "=== release.created_at=%s", release.created_at);
+            }
+            if (type == LWJSON_STREAM_TYPE_TRUE && strcmp(jsp->stack[2].meta.name, "prerelease") == 0) {
+                release.prerelease = true;
+                ESP_LOGD(TAG, "=== release.prerelease=%d", release.prerelease);
+            }
+        }
+
+        if (jsp->stack_pos >= 6 && strcmp(jsp->stack[2].meta.name, "assets") == 0 &&
+            jsp->stack[3].type == LWJSON_STREAM_TYPE_ARRAY && jsp->stack[4].type == LWJSON_STREAM_TYPE_OBJECT &&
+            jsp->stack[5].type == LWJSON_STREAM_TYPE_KEY) {
+            if (type == LWJSON_STREAM_TYPE_STRING && strcmp(jsp->stack[5].meta.name, "name") == 0) {
+                strncpy((char *)asset.name, (char *)jsp->data.str.buff, sizeof(asset.name));
+                ESP_LOGD(TAG, "====== asset.name=%s", asset.name);
+            }
+            if (type == LWJSON_STREAM_TYPE_STRING && strcmp(jsp->stack[5].meta.name, "browser_download_url") == 0) {
+                strncpy((char *)asset.url, (char *)jsp->data.str.buff, sizeof(asset.url));
+                ESP_LOGD(TAG, "====== asset.url=%s", asset.url);
             }
         }
     }
 
-    // finish item in assets array
     if (type == LWJSON_STREAM_TYPE_OBJECT_END && (*jsp).stack_pos == 4) {
-        // ESP_LOGI(TAG, "4 LWJSON_STREAM_TYPE_OBJECT_END %s / %s ", ota_github_release_asset.name, ota_github_release_asset.url);
-        if (ota_github_release_asset.url[0] == '\0'
-            && strcmp((char *)ota_github_release_asset.name, (char *)ota_github_config.filename) == 0
-        ) {
-            strncpy(
-                (char *)ota_github_release.download_url, (char *)ota_github_release_asset.url, 
-                sizeof(ota_github_release_asset.url)
-            );
+        ESP_LOGD(TAG, "Finish object item in assets, %s = %s", asset.name, asset.url);
+        if (asset.url[0] != '\0' && strcmp((char *)asset.name, (char *)g_ota_github_config->filename) == 0) {
+            strncpy((char *)release.download_url, (char *)asset.url, sizeof(asset.url));
+            ESP_LOGD(TAG, "=========== release.download_url=%s", release.download_url);
         }
-        ota_github_release_asset = (ota_github_release_asset_t){0};
+        asset = (ota_github_release_asset_t){0};
     }
 
-    // finish item in releases array
     if (type == LWJSON_STREAM_TYPE_OBJECT_END && (*jsp).stack_pos == 1) {
-        if (ota_github_releases.size < OTA_GITHUB_releases_SIZE 
-            && ota_github_release.download_url[0] != '\0'
-        ) {
-            bool prerelease_ok = true;
-            if (ota_github_config.prerelease == true && ota_github_release.prerelease != true) {
-                prerelease_ok = false;
+        ESP_LOGI(TAG, "Finish object item in releases array:");
+        ESP_LOGI(TAG, "  id = %lld", release.id);
+        ESP_LOGI(TAG, "  name = %s", release.name);
+        ESP_LOGI(TAG, "  tag_name = %s", release.tag_name);
+        ESP_LOGI(TAG, "  created_at = %s", release.created_at);
+        ESP_LOGI(TAG, "  download_url = %s", release.download_url);
+        ESP_LOGI(TAG, "  prerelease = %d", release.prerelease);
+
+        if (release.download_url[0] != '\0' && g_ota_github_releases->size < OTA_GITHUB_RELEASES_SIZE) {
+            bool prerelease_check = true;
+            if (g_ota_github_config->prerelease == true && release.prerelease != true) {
+                prerelease_check = false;
             }
-            if (ota_github_config.prerelease != true && ota_github_release.prerelease == true) {
-                prerelease_ok = false;
+            if (g_ota_github_config->prerelease != true && release.prerelease == true) {
+                prerelease_check = false;
             }
 
-            bool newer_ok = true;
-            if (ota_github_config.newer) {
+            bool newer_check = true;
+            if (g_ota_github_config->newer) {
                 semver_t current_version = {};
                 semver_t compare_version = {};
-                char* current = (strncmp((char *)ota_github_config.current_version, "v", 1) == 0)
-                    ? (char *)(ota_github_config.current_version + 1) 
-                    : (char *)ota_github_config.current_version;     
-                char* compare = (strncmp((char *)ota_github_release.tag_name, "v", 1) == 0)
-                    ? (char *)(ota_github_release.tag_name + 1) 
-                    : (char *)ota_github_release.tag_name;
+                char *current = (strncmp((char *)g_ota_github_config->current_version, "v", 1) == 0)
+                                    ? (char *)(g_ota_github_config->current_version + 1)
+                                    : (char *)g_ota_github_config->current_version;
+                char *compare = (strncmp((char *)release.tag_name, "v", 1) == 0) ? (char *)(release.tag_name + 1)
+                                                                                 : (char *)release.tag_name;
                 if (semver_parse(current, &current_version) || semver_parse(compare, &compare_version)) {
-                    newer_ok = false;
+                    newer_check = false;
                 } else {
                     int resolution = semver_compare(compare_version, current_version);
-                    newer_ok = resolution > 0;
+                    newer_check = resolution > 0;
                 }
             }
 
-            bool release_ok = true;
-            if (ota_github_config.release_id && ota_github_config.release_id != ota_github_release.id) {
-                release_ok = false;
+            bool release_check = true;
+            if (g_ota_github_config->release_id && g_ota_github_config->release_id != release.id) {
+                release_check = false;
             }
 
-            if (newer_ok && prerelease_ok && release_ok) {
+            ESP_LOGI(TAG, "=== newer=%d, prerelease=%d, release=%d", newer_check, prerelease_check, release_check);
+            if (newer_check && prerelease_check && release_check && release.id != '\0') {
                 memcpy(
-                    &ota_github_releases.releases[ota_github_releases.size], &ota_github_release,
-                    sizeof(ota_github_release)
+                    &g_ota_github_releases->releases[g_ota_github_releases->size], &release,
+                    sizeof(struct ota_github_release_t)
                 );
-                ota_github_releases.size++;
+                g_ota_github_releases->size++;
             }
+            ESP_LOGI(TAG, "=== g_ota_github_releases->size=%d", g_ota_github_releases->size);
         }
-        ota_github_release = (ota_github_release_t){0};
+        release = (ota_github_release_t){0};
     }
 }

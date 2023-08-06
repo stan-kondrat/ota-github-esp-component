@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.2.0"
 description: "Esp32 Over-The-Air(OTA) Github"
 url: "https://github.com/stan-kondrat/ota-github-esp-component"
 dependencies:
@@ -14,6 +14,9 @@ dependencies:
     version: v0.1.0
     path: .
     git: https://github.com/stan-kondrat/ota-esp-component.git
+  # # For Development
+  # ota-esp-component:
+  #   path: ../ota-esp-component/
 files:
   include:
     - "src/ota_github.c"

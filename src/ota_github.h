@@ -1,16 +1,15 @@
 #pragma once
 
-#include <stdbool.h>
 #include <inttypes.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#ifndef OTA_GITHUB_releases_SIZE
-#define OTA_GITHUB_releases_SIZE 10
+#ifndef OTA_GITHUB_RELEASES_SIZE
+#define OTA_GITHUB_RELEASES_SIZE 10
 #endif
-
 
 typedef struct ota_github_config_t {
     uint8_t github_user[64];
@@ -38,12 +37,11 @@ typedef struct ota_github_release_t {
 } __attribute__((packed)) ota_github_release_t;
 
 typedef struct ota_github_releases_t {
-    ota_github_release_t releases[OTA_GITHUB_releases_SIZE];
+    ota_github_release_t releases[OTA_GITHUB_RELEASES_SIZE];
     int size;
 } __attribute__((packed)) ota_github_releases_t;
 
-
-ota_github_releases_t* ota_github_get_releases(const ota_github_config_t *);
+esp_err_t ota_github_get_releases(ota_github_config_t *config, ota_github_releases_t *result);
 
 esp_err_t ota_github_install_latest(ota_github_config_t *);
 
